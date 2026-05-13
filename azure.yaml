@@ -1,0 +1,23 @@
+name: azquack
+metadata:
+  template: azquack@0.1.0
+infra:
+  provider: bicep
+  path: infra
+services:
+  quack:
+    host: containerapp
+    project: .
+    language: docker
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true
+hooks:
+  preprovision:
+    posix:
+      shell: sh
+      run: ./scripts/setup-azd-env.sh
+  postprovision:
+    posix:
+      shell: sh
+      run: ./scripts/show-connection-info.sh

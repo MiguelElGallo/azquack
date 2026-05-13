@@ -1,0 +1,4 @@
+interface:
+  display_name: "AzQuack Deploy Samples"
+  short_description: "Deploy and validate AzQuack samples"
+  default_prompt: "Use $azquack-deploy-samples to deploy AzQuack and run the local Quack/DuckLake samples."

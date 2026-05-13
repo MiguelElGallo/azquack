@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AzQuack local and generated files
+.azure/*/.env
+.azure/*/config.json
+local/*.duckdb
+local/*.sql
+infra/main.json
