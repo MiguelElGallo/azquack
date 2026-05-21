@@ -1,56 +1,96 @@
 # AzQuack
 
-Deploy a small Azure playground for **DuckDB**, **Quack**, and **DuckLake**.
+You can have a full DuckLake implementation on Azure without running a PostgreSQL server for metadata.
 
-This version is PostgreSQL-free.
+It is not serverless in this sample: the public query app and the internal catalog app both stay warm with one replica each, because Quack serves a live DuckDB process and the catalog app owns a single DuckDB catalog file.
 
-It uses:
+The capacity is intentionally small, and Azure Container Apps Consumption billing uses vCPU/GiB seconds and requests, with active/idle behavior for warm replicas. See the official [Azure Container Apps pricing page](https://azure.microsoft.com/pricing/details/container-apps/) and [billing guide](https://learn.microsoft.com/azure/container-apps/billing) to do the exact math for your region and subscription.
 
-- Azure Blob / ADLS-style storage for DuckLake data files
-- Azure Files for the DuckDB file that stores DuckLake metadata
-- one internal Container App for the DuckLake catalog
-- one public Container App for local DuckDB clients
-- Quack between local DuckDB and Azure
-- Quack again between the query app and the internal catalog app
+This repo deploys:
+
+| App | Replicas | CPU | Memory | Role |
+| --- | ---: | ---: | ---: | --- |
+| `query` | 1 | `0.5` vCPU | `1Gi` | public Quack endpoint for local DuckDB clients |
+| `catalog` | 1 | `0.5` vCPU | `1Gi` | internal Quack endpoint that owns DuckLake metadata |
+| **Total warm ACA capacity** | **2** | **1.0** vCPU | **2Gi** | always running while the experiment is up |
+
+That gives you the raw allocation inputs for estimating the Container Apps part of the bill:
+
+```text
+monthly vCPU-seconds = 1.0 * seconds_in_month
+monthly GiB-seconds  = 2.0 * seconds_in_month
+```
+
+Add Storage, Azure Files, Key Vault, ACR, and Log Analytics for the full estimate.
 
 > [!WARNING]
 > This is a beta experiment.
 > Quack is under active development, and DuckLake-with-Quack catalog support is new in DuckDB `v1.5.3`.
 > Use this repo to experiment, not as a production lakehouse architecture.
 
-## What You Get
+## The Idea
 
-Run one deployment and you get the full test stack:
+DuckLake needs:
+
+- a metadata catalog
+- a place for data files
+- a DuckDB process that can read and write both
+
+This repo makes the metadata catalog another DuckDB process, reached through Quack.
+That removes PostgreSQL from the experiment while keeping the local client experience simple:
+
+```text
+local DuckDB -> public Quack endpoint -> DuckLake -> internal Quack catalog
+```
+
+## One Deployment
+
+After you create an AZD environment, `azd up` deploys the PostgreSQL-free stack:
+
+- DuckLake data files in Azure Blob / ADLS-style storage
+- DuckLake metadata in a DuckDB file on Azure Files
+- an internal Container App that exposes the metadata DuckDB file over Quack
+- a public Container App that local DuckDB clients attach to over Quack
+- separate public and internal Quack tokens in Key Vault
+- managed identities for image pull and Blob data access
+
+No Azure PostgreSQL Flexible Server is created.
+
+### Azure Deployment
 
 ```mermaid
 flowchart LR
-    local["Local DuckDB"]
-    public["Public query app\nDuckDB + Quack + DuckLake"]
-    catalog["Internal catalog app\nDuckDB file + Quack"]
-    files["Storage Account\nBlob / ADLS data files"]
-    share["Storage Account\nAzure Files catalog.duckdb"]
+    subgraph local["Local machine"]
+        duckdb["DuckDB CLI v1.5.3"]
+    end
 
-    local -- "Quack token" --> public
-    public -- "internal Quack token" --> catalog
-    public --> files
-    catalog --> share
+    subgraph azure["Azure resource group"]
+        kv["Key Vault\nquack-token\ncatalog-quack-token"]
+        acr["Azure Container Registry\nAzQuack image"]
+        law["Log Analytics"]
+
+        subgraph aca["Container Apps Environment"]
+            query["Public query Container App\n0.5 vCPU / 1Gi\nmin=1 max=1"]
+            catalog["Internal catalog Container App\n0.5 vCPU / 1Gi\nmin=1 max=1"]
+        end
+
+        blob["Storage Account\nlakehouse container\naz://lakehouse/data/"]
+        files["Catalog Storage Account\nAzure Files share\n/catalog/catalog.duckdb"]
+    end
+
+    duckdb -- "Quack over HTTPS\npublic token" --> query
+    query -- "internal Quack\ncatalog token" --> catalog
+    query -- "DuckLake data files" --> blob
+    catalog -- "DuckDB catalog file" --> files
+    query -.->|"ACA secret refs"| kv
+    catalog -.->|"ACA secret refs"| kv
+    query -.->|"pull image"| acr
+    catalog -.->|"pull image"| acr
+    query -.->|"logs"| law
+    catalog -.->|"logs"| law
 ```
 
-There is **no Azure PostgreSQL Flexible Server** in this profile.
-
-DuckLake data files go to:
-
-```text
-az://lakehouse/data/
-```
-
-DuckLake metadata goes to a DuckDB file mounted into the internal catalog app:
-
-```text
-/catalog/catalog.duckdb
-```
-
-## Requirements
+## Before You Start
 
 Install:
 
@@ -84,15 +124,29 @@ It must print:
 v1.5.3
 ```
 
-## Deploy
+Run the local build validation:
 
-Create a new environment so Azure creates a new resource group:
+```sh
+./scripts/check.sh
+```
+
+That runs Python compile checks, Bicep build, and Docker build.
+
+## Deploy It
+
+Create a fresh environment:
+
+```sh
+azd env new <unique-env-name> --location westus --subscription <subscription-id>
+```
+
+For example:
 
 ```sh
 azd env new azquack-quackcat --location westus --subscription <subscription-id>
 ```
 
-Then deploy everything:
+Then deploy:
 
 ```sh
 azd up
@@ -101,12 +155,20 @@ azd up
 The environment name becomes the resource group name:
 
 ```text
-azquack-quackcat -> rg-azquack-quackcat
+<unique-env-name> -> rg-<unique-env-name>
 ```
 
-Use a fresh environment name for each experiment.
+Use a new environment name for each experiment.
+That keeps each deployment isolated from previous Azure resources.
 
-## Validate
+## Check It
+
+Make sure the intended environment is selected:
+
+```sh
+azd env list
+azd env select <unique-env-name>
+```
 
 Run the live validation:
 
@@ -114,31 +176,23 @@ Run the live validation:
 ./scripts/validate-deployment.sh
 ```
 
-The validator checks:
-
-- no PostgreSQL Flexible Server exists in the resource group
-- the catalog Container App is internal-only
-- the public query Container App is healthy
-- local DuckDB can attach to the query app over Quack
-- a wrong Quack token is rejected
-- DuckLake writes data through the query app
-- a basic transaction rollback/commit sequence behaves as expected
-- two local writers can create separate DuckLake tables at the same time
-- DuckLake metadata is stored through the internal catalog app
-- DuckLake data files exist in Blob Storage
-- `catalog.duckdb` exists in Azure Files
-- query app restart preserves rows
-- catalog app restart plus query reconnect preserves rows
-- recent app logs do not contain the public Quack token
-- recent app logs do not contain the internal catalog token when the validator principal can read it
-
 Expected ending:
 
 ```text
 Deployment validation passed.
 ```
 
-## Query From Local DuckDB
+The validator checks five things:
+
+- Azure shape: no PostgreSQL, two ACR-backed Container Apps, internal catalog ingress
+- Quack auth: valid token works, wrong token fails
+- DuckLake writes: metadata and Blob data files are created
+- persistence: query and catalog restarts preserve rows
+- hygiene: recent logs do not contain token values available to the validator
+
+The script reads values from the active AZD environment.
+
+## Query It From DuckDB
 
 After validation:
 
@@ -146,13 +200,13 @@ After validation:
 ./scripts/connect-local.sh
 ```
 
-That script:
+The script:
 
-1. reads `QUACK_URI` from the active AZD environment,
-2. reads the public Quack token from Key Vault,
-3. creates a local scoped Quack secret,
+1. checks the local DuckDB CLI is `v1.5.3`,
+2. reads `QUACK_URI` and `KEY_VAULT_NAME` from the active AZD environment,
+3. reads the public Quack token from Key Vault,
 4. attaches the public query app,
-5. inserts one smoke-test row into DuckLake,
+5. inserts one smoke-test row,
 6. reads the result back through Quack.
 
 Equivalent SQL:
@@ -180,9 +234,73 @@ FROM remote.query(
 FROM remote.query('SELECT * FROM azquack.demo.events ORDER BY event_id');
 ```
 
-## How DuckLake Uses Quack
+> [!WARNING]
+> The public Quack token is a write credential.
+> A holder can run SQL against objects visible to the query app.
+> That includes transitive write access to DuckLake through the internal catalog app.
+> Quack authorization callbacks are not implemented in this prototype.
 
-The public query app starts DuckDB, creates an Azure managed-identity secret, and attaches DuckLake like this:
+You are done when:
+
+```text
+./scripts/check.sh                  passes
+azd up                              completes
+./scripts/validate-deployment.sh    prints "Deployment validation passed."
+./scripts/connect-local.sh          attaches, writes, and reads back data
+```
+
+## How It Works
+
+### Query Flow
+
+Your laptop does not attach to Azure Storage or Azure Files directly.
+It attaches to the public query app:
+
+```mermaid
+sequenceDiagram
+    participant Local as Local DuckDB
+    participant KV as Key Vault
+    participant Query as Public query app
+    participant Catalog as Internal catalog app
+    participant Blob as Blob / ADLS data files
+    participant Files as Azure Files catalog.duckdb
+
+    Local->>KV: read quack-token
+    Local->>Query: ATTACH quack:query-app-fqdn:443
+    Local->>Query: remote.query('SELECT ...')
+    Query->>Catalog: DuckLake metadata over quack:catalog-app-fqdn:443
+    Catalog->>Files: read/write catalog.duckdb
+    Query->>Blob: read/write DuckLake data files
+    Query-->>Local: result set
+```
+
+The important boundary:
+
+- local users get `quack-token`
+- the query app gets `catalog-quack-token`
+- the catalog app is internal-only
+- the query app is the only public ingress
+
+### Catalog Flow
+
+DuckLake metadata is stored through Quack, not PostgreSQL.
+
+```mermaid
+sequenceDiagram
+    participant ACA as Container Apps platform
+    participant Query as Query app DuckDB
+    participant Catalog as Catalog app DuckDB
+    participant Files as Azure Files
+    participant Blob as Blob / ADLS
+
+    ACA->>Query: provide catalog-quack-token secret ref
+    Query->>Catalog: ATTACH ducklake:quack:catalog-app-fqdn:443
+    Query->>Catalog: catalog metadata operations
+    Catalog->>Files: open /catalog/catalog.duckdb
+    Query->>Blob: write/read DuckLake data files
+```
+
+The query app creates an internal Quack secret:
 
 ```sql
 CREATE OR REPLACE SECRET azquack_catalog_quack (
@@ -190,7 +308,11 @@ CREATE OR REPLACE SECRET azquack_catalog_quack (
     SCOPE 'quack:<internal-catalog-app-fqdn>:443',
     TOKEN '<internal-token-from-key-vault>'
 );
+```
 
+Then it attaches DuckLake:
+
+```sql
 ATTACH 'ducklake:quack:<internal-catalog-app-fqdn>:443' AS azquack (
     DATA_PATH 'az://lakehouse/data/',
     AUTOMATIC_MIGRATION true
@@ -199,9 +321,42 @@ ATTACH 'ducklake:quack:<internal-catalog-app-fqdn>:443' AS azquack (
 USE azquack;
 ```
 
-The catalog app owns the DuckDB metadata file.
-The query app owns Blob writes for DuckLake data files.
-The local machine only talks to the public query app.
+The catalog app is the only process that opens:
+
+```text
+/catalog/catalog.duckdb
+```
+
+### Storage And Identity
+
+```mermaid
+flowchart TB
+    qid["Query app\nuser-assigned identity"]
+    cid["Catalog app\nuser-assigned identity"]
+    op["Operator principal\noptional for local tests"]
+    acaStorage["Container Apps Environment\nAzure Files storage mount"]
+
+    kvPublic["Key Vault secret\nquack-token"]
+    kvCatalog["Key Vault secret\ncatalog-quack-token"]
+    data["Data Storage Account\nlakehouse container\naz://lakehouse/data/"]
+    acr["Azure Container Registry\nAcrPull"]
+    share["Catalog Azure Files\nmounted with storage account key"]
+
+    qid -->|"Key Vault Secrets User"| kvPublic
+    qid -->|"Key Vault Secrets User"| kvCatalog
+    qid -->|"Storage Blob Data Contributor"| data
+    qid -->|"AcrPull"| acr
+
+    cid -->|"Key Vault Secrets User"| kvCatalog
+    cid -->|"AcrPull"| acr
+    acaStorage -->|"storage account key"| share
+    cid -.->|"uses mounted /catalog path"| share
+
+    op -.->|"Key Vault Secrets User"| kvPublic
+    op -.->|"Storage Blob Data Reader"| data
+```
+
+The local DuckDB client does not talk to Blob Storage or Azure Files directly.
 
 ## What Gets Deployed
 
@@ -217,43 +372,45 @@ The local machine only talks to the public query app.
 | Log Analytics workspace | Container App logs |
 | Managed identities | Separate identities for query and catalog apps |
 
-## Authentication
-
-There are two token planes:
-
-| Token | Used by | Purpose |
-| --- | --- | --- |
-| `quack-token` | local DuckDB -> public query app | public experiment access |
-| `catalog-quack-token` | query app -> internal catalog app | private metadata catalog access |
-
-The local scripts read only `quack-token`.
-They do not need the internal catalog token.
-
-> [!WARNING]
-> The public Quack token is a write credential.
-> A holder can run SQL against objects visible to the query app.
-> That includes transitive write access to DuckLake through the internal catalog app.
-> Quack authorization callbacks are not implemented in this prototype.
-
 ## Security Boundaries
 
 This deployment is intentionally small and easy to inspect.
 It is not hardened.
 
-- The catalog app uses internal Container Apps ingress only.
-- The query app is internet-reachable and protected by the public Quack token.
-- Blob public access is disabled.
-- The DuckLake data Storage Account disables shared-key access.
-- ACR admin credentials are disabled.
-- Image pulls use managed identity.
-- Key Vault uses Azure RBAC, but public network access is still enabled.
-- The catalog Azure Files account uses shared-key access because Container Apps Azure Files mounts require a storage key.
+| Boundary | Current behavior |
+| --- | --- |
+| Public ingress | query app only |
+| Catalog ingress | internal ACA ingress only |
+| Public token | write access to the query app |
+| Internal token | query app to catalog app |
+| Data storage | Blob public access disabled |
+| Data auth | managed identity, shared-key disabled |
+| Catalog file storage | Azure Files mount with storage account key |
+| ACR | admin credentials disabled |
+| Key Vault | Azure RBAC, public network access enabled |
 
 A hardened version should add private networking, stricter Quack authorization, network restrictions in front of the query app, and backup/restore automation for the catalog DuckDB file.
 
-## Cost
+## Cost Model
 
 This deployment removes the PostgreSQL Flexible Server cost.
+
+```mermaid
+flowchart LR
+    cost["Billable surfaces"]
+
+    ca["Container Apps\n2 apps\n0.5 vCPU / 1Gi each\nminReplicas=1\nmaxReplicas=1"]
+    storage["Storage\nBlob / ADLS data account\nAzure Files catalog account\n16 GiB share quota"]
+    acr["ACR Basic\nadmin disabled"]
+    kv["Key Vault Standard"]
+    logs["Log Analytics\nPerGB2018\n30-day retention"]
+
+    cost --> ca
+    cost --> storage
+    cost --> acr
+    cost --> kv
+    cost --> logs
+```
 
 It still creates billable resources:
 
@@ -264,21 +421,19 @@ It still creates billable resources:
 - Key Vault
 - Log Analytics
 
-Clean up when done:
+For a 730-hour month, the raw allocation inputs are:
 
-```sh
-azd down --purge --force --no-prompt
+```text
+seconds in month = 730 * 60 * 60 = 2,628,000
+vCPU-seconds     = 1.0 * 2,628,000 = 2,628,000
+GiB-seconds      = 2.0 * 2,628,000 = 5,256,000
 ```
 
-## Local Checks
+Azure documents current rates and any applicable included grants or discounts. Verify them for your subscription and region:
 
-Before deployment:
-
-```sh
-./scripts/check.sh
-```
-
-That runs Python compile checks, Bicep build, and Docker build.
+- [Azure Container Apps pricing](https://azure.microsoft.com/pricing/details/container-apps/)
+- [Azure Container Apps billing](https://learn.microsoft.com/azure/container-apps/billing)
+- [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/)
 
 ## Generated Environment Values
 
