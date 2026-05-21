@@ -1,43 +1,66 @@
 # Architecture
 
-AzQuack deploys one remote DuckDB process and exposes it with the Quack protocol.
+AzQuack now uses a PostgreSQL-free DuckLake catalog experiment.
 
 ```mermaid
 flowchart LR
-    local["Local DuckDB + Quack extension"]
-    ingress["Azure Container Apps HTTPS ingress"]
-    proxy["Caddy process\nHTTP reverse proxy"]
-    server["DuckDB process\nQuack bound to 127.0.0.1\nDuckLake attached"]
-    pg["Azure Database for PostgreSQL\nDuckLake metadata only"]
-    blob["Azure Storage Account\nDuckLake Parquet files"]
-    kv["Azure Key Vault\nContainer Apps resolves secrets"]
+    local["Local DuckDB + Quack"]
+    ingress["External ACA HTTPS ingress"]
+    queryProxy["Caddy in query app"]
+    query["DuckDB query process\nDuckLake attached"]
+    catalogIngress["Internal ACA ingress"]
+    catalogProxy["Caddy in catalog app"]
+    catalog["DuckDB catalog process\n/catalog/catalog.duckdb"]
+    blob["Blob / ADLS data files\naz://lakehouse/data/"]
+    files["Azure Files\ncatalog.duckdb"]
+    kv["Key Vault\nQuack tokens"]
 
-    local -- "quack:...:443 + token" --> ingress
-    ingress --> proxy
-    proxy --> server
-    server --> pg
-    server --> blob
-    ingress -. "secret refs" .-> kv
+    local -- "public Quack token" --> ingress
+    ingress --> queryProxy --> query
+    query -- "internal Quack token" --> catalogIngress
+    catalogIngress --> catalogProxy --> catalog
+    query --> blob
+    catalog --> files
+    query -. "secret refs" .-> kv
+    catalog -. "secret refs" .-> kv
 ```
 
 ## Runtime Contract
 
-- The Container App runs exactly one replica. Quack exposes a single DuckDB server session, so multiple replicas would split session state and writes.
-- DuckLake metadata is stored in PostgreSQL. DuckLake data files are stored as Parquet under `az://lakehouse/data/`.
-- Local clients do not connect directly to PostgreSQL or Storage. They authenticate to Quack and send SQL to the remote DuckDB server.
-- Azure Container Apps terminates HTTPS and forwards HTTP to Caddy on port `8081`. The checked-in [Caddyfile](../deploy/Caddyfile) is copied into the application image and routes health checks to Python on `127.0.0.1:8080`, and routes Quack traffic to `127.0.0.1:9494` with streaming flushes and a 256 MB request body limit.
+- The query Container App exposes the only public Quack endpoint.
+- The catalog Container App uses internal Container Apps ingress only.
+- The catalog app is the only process that opens `/catalog/catalog.duckdb`.
+- The query app attaches DuckLake with `ducklake:quack:<internal-catalog-fqdn>:443`.
+- DuckLake data files are written by the query app to `az://lakehouse/data/`.
+- Both Container Apps run with `minReplicas: 1` and `maxReplicas: 1`.
+
+## Storage Contract
+
+DuckLake uses two Azure storage surfaces:
+
+| Storage | Used for | Access |
+| --- | --- | --- |
+| Blob / ADLS container | Parquet/data files | query app managed identity |
+| Azure Files share | DuckDB metadata catalog file | Container Apps Azure Files mount |
+
+The data Storage Account disables shared-key access.
+The catalog Storage Account keeps shared-key access enabled because Azure Container Apps Azure Files mounts require an account key.
 
 ## Security Posture
 
-- Quack requires a shared token stored in Key Vault.
-- PostgreSQL is used only as a metadata catalog. Deployment creates a dedicated `ducklake_app` role for DuckLake metadata operations.
-- The PostgreSQL administrator password is used only during startup role bootstrap and is removed from the process environment before Quack starts serving remote SQL.
-- The Container App uses a user-assigned managed identity for Azure Blob access.
-- Storage public blob access is disabled.
-- ACR admin credentials are disabled; the Container App pulls with managed identity.
-- A holder of the Quack token can execute SQL as the remote DuckDB server. Treat the token as write access to the DuckLake until a stricter Quack authorization callback is added.
-- PostgreSQL and Key Vault still use public Azure endpoints in this prototype. A hardened variant should move those dependencies behind private networking.
+- `quack-token` is for local DuckDB clients and the public query app.
+- `catalog-quack-token` is for query app to internal catalog app only.
+- Normal local client scripts do not read `catalog-quack-token`; the validator reads the local AZD value when available only to scan logs for leaks.
+- Key Vault grants each Container App identity only the secret refs it needs.
+- ACR admin credentials are disabled; both apps pull with managed identity.
+- The public query app remains internet-reachable and token-protected.
+- A public-token holder has transitive write access to DuckLake through the query app, even though the internal catalog token is not exposed locally.
+
+> [!WARNING]
+> Quack token authentication does not restrict SQL by itself.
+> A token holder can run SQL against objects visible to the server session.
 
 ## Beta Caveats
 
-Quack is currently documented as beta in DuckDB v1.5.2 and distributed from `core_nightly`. Function names, settings, and defaults may change. The Docker image installs extensions at startup so it picks up the current extension repository behavior during deployment.
+This design relies on DuckDB `v1.5.3`, where Quack is a core extension and DuckLake can use a Quack endpoint as the metadata catalog.
+The behavior is new and should be treated as experimental until restart, rollback, concurrency, and backup behavior are proven for your workload.

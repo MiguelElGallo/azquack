@@ -9,8 +9,7 @@ from pathlib import Path
 
 
 SENSITIVE_ENV_NAMES = {
-    "AZQUACK_PG_ADMIN_PASSWORD",
-    "AZQUACK_PG_PASSWORD",
+    "AZQUACK_CATALOG_QUACK_TOKEN",
     "AZQUACK_QUACK_TOKEN",
 }
 
@@ -32,6 +31,7 @@ def terminate(processes: list[subprocess.Popen[object]]) -> None:
 
 def main() -> int:
     caddyfile = Path(os.getenv("AZQUACK_CADDYFILE", "/app/deploy/Caddyfile"))
+    enable_caddy = os.getenv("AZQUACK_ENABLE_CADDY", "true").lower() == "true"
     processes: list[subprocess.Popen[object]] = []
 
     def handle_signal(signum: int, _frame: object) -> None:
@@ -41,19 +41,23 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    processes.append(
-        subprocess.Popen(
-            [
-                "caddy",
-                "run",
-                "--config",
-                str(caddyfile),
-                "--adapter",
-                "caddyfile",
-            ],
-            env=scrubbed_env(),
+    if enable_caddy:
+        processes.append(
+            subprocess.Popen(
+                [
+                    "caddy",
+                    "run",
+                    "--config",
+                    str(caddyfile),
+                    "--adapter",
+                    "caddyfile",
+                ],
+                env=scrubbed_env(),
+            )
         )
-    )
+    else:
+        print("Caddy disabled for this AzQuack role.", flush=True)
+
     processes.append(subprocess.Popen(["azquack-server"]))
 
     while True:

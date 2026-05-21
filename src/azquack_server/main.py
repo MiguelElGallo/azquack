@@ -10,8 +10,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NoReturn
 
 import duckdb
-import psycopg
-from psycopg import sql
 
 
 LOG_LEVEL = os.getenv("AZQUACK_LOG_LEVEL", "INFO").upper()
@@ -67,17 +65,9 @@ def start_health_server() -> ThreadingHTTPServer:
 
 
 def install_and_load_extensions(con: duckdb.DuckDBPyConnection) -> None:
-    extensions = [
-        ("azure", None),
-        ("postgres", None),
-        ("ducklake", None),
-        ("quack", "core_nightly"),
-    ]
-    for extension, repository in extensions:
-        if repository:
-            con.execute(f"FORCE INSTALL {extension} FROM {repository}")
-        else:
-            con.execute(f"FORCE INSTALL {extension}")
+    extensions = ["azure", "ducklake", "quack"]
+    for extension in extensions:
+        con.execute(f"FORCE INSTALL {extension}")
         con.execute(f"LOAD {extension}")
 
 
@@ -113,36 +103,24 @@ def configure_storage_secret(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def attach_ducklake(con: duckdb.DuckDBPyConnection) -> None:
-    host = require_env("AZQUACK_PG_HOST")
-    database = require_env("AZQUACK_PG_DATABASE")
-    user = require_env("AZQUACK_PG_USER")
-    password = require_env("AZQUACK_PG_PASSWORD")
+def attach_ducklake_via_quack(con: duckdb.DuckDBPyConnection) -> None:
+    catalog_uri = require_env("AZQUACK_CATALOG_QUACK_URI")
+    catalog_token = require_env("AZQUACK_CATALOG_QUACK_TOKEN")
     data_path = require_env("AZQUACK_DUCKLAKE_DATA_PATH")
-    port = os.getenv("AZQUACK_PG_PORT", "5432")
-    sslmode = os.getenv("AZQUACK_PG_SSLMODE", "require")
-
-    conninfo = (
-        f"dbname={database} host={host} port={port} user={user} sslmode={sslmode}"
-    )
     con.execute(
         f"""
-        CREATE OR REPLACE SECRET azquack_pg_catalog (
-            TYPE postgres,
-            HOST {sql_string(host)},
-            PORT {port},
-            DATABASE {sql_string(database)},
-            USER {sql_string(user)},
-            PASSWORD {sql_string(password)}
+        CREATE OR REPLACE SECRET azquack_catalog_quack (
+            TYPE quack,
+            SCOPE {sql_string(catalog_uri)},
+            TOKEN {sql_string(catalog_token)}
         )
         """
     )
     con.execute(
         f"""
-        ATTACH {sql_string("ducklake:postgres:" + conninfo)} AS azquack
+        ATTACH {sql_string("ducklake:" + catalog_uri)} AS azquack
         (
             DATA_PATH {sql_string(data_path)},
-            META_SECRET 'azquack_pg_catalog',
             AUTOMATIC_MIGRATION true
         )
         """
@@ -150,95 +128,23 @@ def attach_ducklake(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("USE azquack")
 
 
-def ensure_catalog_role() -> None:
-    host = require_env("AZQUACK_PG_HOST")
-    database = require_env("AZQUACK_PG_DATABASE")
-    admin_user = require_env("AZQUACK_PG_ADMIN_USER")
-    admin_password = require_env("AZQUACK_PG_ADMIN_PASSWORD")
-    role = require_env("AZQUACK_PG_USER")
-    role_password = require_env("AZQUACK_PG_PASSWORD")
-    port = int(os.getenv("AZQUACK_PG_PORT", "5432"))
-
-    conninfo = {
-        "host": host,
-        "port": port,
-        "dbname": database,
-        "user": admin_user,
-        "password": admin_password,
-        "sslmode": os.getenv("AZQUACK_PG_SSLMODE", "require"),
-    }
-
-    attempts = int(os.getenv("AZQUACK_PG_INIT_ATTEMPTS", "8"))
+def attach_ducklake_with_retry(con: duckdb.DuckDBPyConnection) -> None:
+    attempts = int(os.getenv("AZQUACK_CATALOG_ATTACH_ATTEMPTS", "12"))
     for attempt in range(1, attempts + 1):
         try:
-            with psycopg.connect(**conninfo, autocommit=True) as pg:
-                with pg.cursor() as cur:
-                    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
-                    if cur.fetchone() is None:
-                        cur.execute(
-                            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                                sql.Identifier(role),
-                                sql.Literal(role_password),
-                            )
-                        )
-                    else:
-                        cur.execute(
-                            sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD {}").format(
-                                sql.Identifier(role),
-                                sql.Literal(role_password),
-                            )
-                        )
-                    cur.execute(
-                        sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
-                            sql.Identifier(database),
-                            sql.Identifier(role),
-                        )
-                    )
-                    cur.execute(
-                        sql.SQL("GRANT CREATE, TEMPORARY ON DATABASE {} TO {}").format(
-                            sql.Identifier(database),
-                            sql.Identifier(role),
-                        )
-                    )
-                    cur.execute(
-                        sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(
-                            sql.Identifier(role),
-                        )
-                    )
-                    cur.execute(
-                        sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {}").format(
-                            sql.Identifier(role),
-                        )
-                    )
-                    cur.execute(
-                        sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {}").format(
-                            sql.Identifier(role),
-                        )
-                    )
-            LOGGER.info("DuckLake catalog role is ready")
+            attach_ducklake_via_quack(con)
             return
         except Exception as exc:
             if attempt == attempts:
                 raise
             delay = min(30, attempt * 5)
             LOGGER.warning(
-                "catalog role setup failed (%s); retrying in %s seconds",
+                "DuckLake catalog attach failed (%s); retrying in %s seconds",
                 exc,
                 delay,
                 exc_info=True,
             )
             time.sleep(delay)
-
-
-def maybe_ensure_catalog_role() -> None:
-    if os.getenv("AZQUACK_PG_ADMIN_PASSWORD"):
-        try:
-            ensure_catalog_role()
-        finally:
-            os.environ.pop("AZQUACK_PG_ADMIN_USER", None)
-            os.environ.pop("AZQUACK_PG_ADMIN_PASSWORD", None)
-        return
-    LOGGER.info("skipping catalog role setup; no PostgreSQL admin password in runtime")
 
 
 def initialize_demo_data(con: duckdb.DuckDBPyConnection) -> None:
@@ -280,6 +186,7 @@ def initialize_demo_data(con: duckdb.DuckDBPyConnection) -> None:
 
 def identify_node(con: duckdb.DuckDBPyConnection) -> None:
     meta = {
+        "role": os.getenv("AZQUACK_ROLE", "query"),
         "storage_account": os.getenv("AZQUACK_STORAGE_ACCOUNT"),
         "ducklake_data_path": os.getenv("AZQUACK_DUCKLAKE_DATA_PATH"),
     }
@@ -311,12 +218,47 @@ def serve_quack(con: duckdb.DuckDBPyConnection) -> None:
     LOGGER.info("quack server started on %s", uri)
 
 
+def run_catalog() -> None:
+    global STARTUP_ERROR
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    health_server = start_health_server()
+    db_path = require_env("AZQUACK_CATALOG_DB_PATH")
+    con = duckdb.connect(db_path)
+    try:
+        LOGGER.info("starting catalog role with DuckDB file %s", db_path)
+        con.execute("FORCE INSTALL quack")
+        con.execute("LOAD quack")
+        identify_node(con)
+        serve_quack(con)
+        READY.set()
+        LOGGER.info("AzQuack catalog is ready")
+
+        while not STOP.is_set():
+            time.sleep(1)
+    except Exception as exc:
+        STARTUP_ERROR = f"{type(exc).__name__}: {exc}"
+        LOGGER.exception("catalog startup failed")
+        raise
+    finally:
+        READY.clear()
+        listen_uri = os.getenv("AZQUACK_LISTEN_URI", "quack:127.0.0.1:9494")
+        try:
+            con.execute(f"CALL quack_stop({sql_string(listen_uri)})")
+        except Exception as exc:  # noqa: BLE001 - shutdown should continue.
+            LOGGER.info("quack stop skipped: %s", exc)
+        con.close()
+        health_server.shutdown()
+
+
 def handle_signal(signum: int, _frame: object) -> None:
     LOGGER.info("received signal %s, shutting down", signum)
     STOP.set()
 
 
-def run() -> None:
+def run_query() -> None:
     global STARTUP_ERROR
 
     signal.signal(signal.SIGTERM, handle_signal)
@@ -329,10 +271,8 @@ def run() -> None:
         install_and_load_extensions(con)
         LOGGER.info("configuring Azure storage secret")
         configure_storage_secret(con)
-        LOGGER.info("ensuring PostgreSQL catalog role")
-        maybe_ensure_catalog_role()
-        LOGGER.info("attaching DuckLake")
-        attach_ducklake(con)
+        LOGGER.info("attaching DuckLake through internal Quack catalog")
+        attach_ducklake_with_retry(con)
         LOGGER.info("initializing demo data")
         initialize_demo_data(con)
         LOGGER.info("identifying Quack node")
@@ -361,17 +301,14 @@ def run() -> None:
 
 def main() -> NoReturn:
     try:
-        run()
+        role = os.getenv("AZQUACK_ROLE", "query")
+        if role == "catalog":
+            run_catalog()
+        elif role == "query":
+            run_query()
+        else:
+            raise RuntimeError(f"Unsupported AZQUACK_ROLE: {role}")
     except Exception:
         LOGGER.exception("azquack server failed")
-        raise SystemExit(1)
-    raise SystemExit(0)
-
-
-def init_catalog_main() -> NoReturn:
-    try:
-        ensure_catalog_role()
-    except Exception:
-        LOGGER.exception("catalog role bootstrap failed")
         raise SystemExit(1)
     raise SystemExit(0)

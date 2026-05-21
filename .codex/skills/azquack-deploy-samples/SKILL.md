@@ -10,9 +10,9 @@ Use this skill from the repo root.
 ## Guardrails
 
 - Deploy only to a new AZD environment/resource group unless the user explicitly asks to reuse one.
-- Treat `.azure/*/.env`, Quack tokens, PostgreSQL passwords, subscription IDs, and live endpoints as sensitive. Do not commit them.
-- Keep Quack beta caveats visible: DuckDB CLI and server should be `v1.5.2`, and Quack installs from `core_nightly`.
-- Expect prototype security boundaries: public Quack endpoint with shared token, public PostgreSQL/Key Vault/Storage/ACR endpoints, and a startup-only PostgreSQL admin bootstrap.
+- Treat `.azure/*/.env`, Quack tokens, subscription IDs, storage account keys, and live endpoints as sensitive. Do not commit them.
+- Keep beta caveats visible: this repo uses DuckDB `v1.5.3`, Quack, and DuckLake-with-Quack catalog support.
+- Expect prototype security boundaries: public query app with shared token, internal catalog app with a separate token, public Key Vault/Storage/ACR endpoints, and an Azure Files mount for the catalog DuckDB file.
 
 ## Deploy
 
@@ -49,7 +49,7 @@ Run the full live validation first:
 ./scripts/validate-deployment.sh
 ```
 
-It must show `Deployment validation passed.` This checks health, readiness, authenticated Quack attach, wrong-token rejection, DuckLake writes, Blob file proof, and restart persistence.
+It must show `Deployment validation passed.` This checks no PostgreSQL resource exists, both apps run ACR images, catalog ingress is internal-only, authenticated Quack attach, wrong-token rejection, DuckLake writes, rollback/commit behavior, concurrent writers, Blob file proof, Azure Files catalog proof, query restart persistence, catalog restart persistence, and token log hygiene.
 
 Then run the small local sample:
 
@@ -65,13 +65,21 @@ It should attach to `QUACK_URI`, call `whoami()`, insert `local-client-smoke`, a
   ```sh
   azd env get-values
   ```
-- Check revision state:
+- Check query app revisions:
   ```sh
-  az containerapp revision list --name "$(azd env get-value CONTAINER_APP_NAME)" --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" -o table
+  az containerapp revision list --name "$(azd env get-value QUERY_CONTAINER_APP_NAME)" --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" -o table
   ```
-- Check logs:
+- Check catalog app revisions:
   ```sh
-  az containerapp logs show --name "$(azd env get-value CONTAINER_APP_NAME)" --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" --type console --tail 120 --follow false
+  az containerapp revision list --name "$(azd env get-value CATALOG_CONTAINER_APP_NAME)" --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" -o table
+  ```
+- Check query logs:
+  ```sh
+  az containerapp logs show --name "$(azd env get-value QUERY_CONTAINER_APP_NAME)" --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" --type console --tail 120 --follow false
+  ```
+- Check catalog logs:
+  ```sh
+  az containerapp logs show --name "$(azd env get-value CATALOG_CONTAINER_APP_NAME)" --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" --type console --tail 120 --follow false
   ```
 - Check health:
   ```sh
@@ -84,7 +92,7 @@ It should attach to `QUACK_URI`, call `whoami()`, insert `local-client-smoke`, a
 When the experiment is done:
 
 ```sh
-azd down --purge
+azd down --purge --force --no-prompt
 ```
 
 If Key Vault purge is not authorized, report the soft-deleted vault name and do not reuse the same environment name.

@@ -1,21 +1,30 @@
 param location string
 param containerAppsEnvironmentName string
-param containerAppName string
-param containerAppIdentityId string
-param containerAppIdentityClientId string
+param queryContainerAppName string
+param catalogContainerAppName string
+param queryContainerAppIdentityId string
+param queryContainerAppIdentityClientId string
+param catalogContainerAppIdentityId string
+param catalogContainerAppIdentityClientId string
 param containerAppImage string
-param containerCpu string
-param containerMemory string
+param queryContainerCpu string
+param queryContainerMemory string
+param catalogContainerCpu string
+param catalogContainerMemory string
 param storageAccountName string
-param postgresFqdn string
-param postgresAdminLogin string
-param ducklakeCatalogUser string
-param postgresDatabaseName string
+param catalogStorageAccountName string
+param catalogFileShareName string
 param ducklakeDataPath string
 param acrLoginServer string
-param ducklakeCatalogPasswordSecretUri string
-param postgresAdminPasswordSecretUri string
 param quackTokenSecretUri string
+param catalogQuackTokenSecretUri string
+
+var catalogStorageMountName = 'catalog'
+var catalogDbPath = '/catalog/catalog.duckdb'
+
+resource catalogStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: catalogStorageAccountName
+}
 
 resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   name: 'law-${containerAppsEnvironmentName}'
@@ -47,16 +56,29 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   }
 }
 
-resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: containerAppName
+resource catalogStorageMount 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
+  parent: containerAppsEnvironment
+  name: catalogStorageMountName
+  properties: {
+    azureFile: {
+      accountName: catalogStorageAccountName
+      accountKey: catalogStorageAccount.listKeys().keys[0].value
+      shareName: catalogFileShareName
+      accessMode: 'ReadWrite'
+    }
+  }
+}
+
+resource catalogContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: catalogContainerAppName
   location: location
   tags: {
-    'azd-service-name': 'quack'
+    'azd-service-name': 'catalog'
   }
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
-      '${containerAppIdentityId}': {}
+      '${catalogContainerAppIdentityId}': {}
     }
   }
   properties: {
@@ -65,25 +87,136 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       activeRevisionsMode: 'Single'
       secrets: [
         {
-          name: 'postgres-admin-password'
-          keyVaultUrl: postgresAdminPasswordSecretUri
-          identity: containerAppIdentityId
-        }
-        {
-          name: 'ducklake-catalog-password'
-          keyVaultUrl: ducklakeCatalogPasswordSecretUri
-          identity: containerAppIdentityId
-        }
-        {
-          name: 'quack-token'
-          keyVaultUrl: quackTokenSecretUri
-          identity: containerAppIdentityId
+          name: 'catalog-quack-token'
+          keyVaultUrl: catalogQuackTokenSecretUri
+          identity: catalogContainerAppIdentityId
         }
       ]
       registries: [
         {
           server: acrLoginServer
-          identity: containerAppIdentityId
+          identity: catalogContainerAppIdentityId
+        }
+      ]
+      ingress: {
+        external: false
+        targetPort: 8081
+        transport: 'auto'
+        allowInsecure: false
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'catalog'
+          image: containerAppImage
+          resources: {
+            cpu: json(catalogContainerCpu)
+            memory: catalogContainerMemory
+          }
+          env: [
+            {
+              name: 'AZURE_LOCATION'
+              value: location
+            }
+            {
+              name: 'AZURE_CLIENT_ID'
+              value: catalogContainerAppIdentityClientId
+            }
+            {
+              name: 'AZQUACK_ROLE'
+              value: 'catalog'
+            }
+            {
+              name: 'AZQUACK_NODE_NAME'
+              value: 'azquack-catalog'
+            }
+            {
+              name: 'AZQUACK_CATALOG_DB_PATH'
+              value: catalogDbPath
+            }
+            {
+              name: 'AZQUACK_QUACK_TOKEN'
+              secretRef: 'catalog-quack-token'
+            }
+          ]
+          volumeMounts: [
+            {
+              volumeName: catalogStorageMountName
+              mountPath: '/catalog'
+            }
+          ]
+          probes: [
+            {
+              type: 'liveness'
+              httpGet: {
+                path: '/healthz'
+                port: 8080
+              }
+              periodSeconds: 10
+              initialDelaySeconds: 30
+              failureThreshold: 3
+            }
+            {
+              type: 'readiness'
+              httpGet: {
+                path: '/readyz'
+                port: 8080
+              }
+              periodSeconds: 5
+              initialDelaySeconds: 10
+              failureThreshold: 12
+            }
+          ]
+        }
+      ]
+      volumes: [
+        {
+          name: catalogStorageMountName
+          storageType: 'AzureFile'
+          storageName: catalogStorageMount.name
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1
+      }
+    }
+  }
+}
+
+resource queryContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: queryContainerAppName
+  location: location
+  tags: {
+    'azd-service-name': 'query'
+  }
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${queryContainerAppIdentityId}': {}
+    }
+  }
+  properties: {
+    managedEnvironmentId: containerAppsEnvironment.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      secrets: [
+        {
+          name: 'quack-token'
+          keyVaultUrl: quackTokenSecretUri
+          identity: queryContainerAppIdentityId
+        }
+        {
+          name: 'catalog-quack-token'
+          keyVaultUrl: catalogQuackTokenSecretUri
+          identity: queryContainerAppIdentityId
+        }
+      ]
+      registries: [
+        {
+          server: acrLoginServer
+          identity: queryContainerAppIdentityId
         }
       ]
       ingress: {
@@ -96,52 +229,44 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     template: {
       containers: [
         {
-          name: 'quack'
+          name: 'query'
           image: containerAppImage
           resources: {
-            cpu: json(containerCpu)
-            memory: containerMemory
+            cpu: json(queryContainerCpu)
+            memory: queryContainerMemory
           }
           env: [
             {
               name: 'AZURE_CLIENT_ID'
-              value: containerAppIdentityClientId
+              value: queryContainerAppIdentityClientId
             }
             {
               name: 'AZURE_LOCATION'
               value: location
             }
             {
+              name: 'AZQUACK_ROLE'
+              value: 'query'
+            }
+            {
+              name: 'AZQUACK_NODE_NAME'
+              value: 'azquack-query'
+            }
+            {
               name: 'AZQUACK_STORAGE_ACCOUNT'
               value: storageAccountName
-            }
-            {
-              name: 'AZQUACK_PG_HOST'
-              value: postgresFqdn
-            }
-            {
-              name: 'AZQUACK_PG_DATABASE'
-              value: postgresDatabaseName
-            }
-            {
-              name: 'AZQUACK_PG_USER'
-              value: ducklakeCatalogUser
             }
             {
               name: 'AZQUACK_DUCKLAKE_DATA_PATH'
               value: ducklakeDataPath
             }
             {
-              name: 'AZQUACK_PG_ADMIN_USER'
-              value: postgresAdminLogin
+              name: 'AZQUACK_CATALOG_QUACK_URI'
+              value: 'quack:${catalogContainerApp.properties.configuration.ingress.fqdn}:443'
             }
             {
-              name: 'AZQUACK_PG_ADMIN_PASSWORD'
-              secretRef: 'postgres-admin-password'
-            }
-            {
-              name: 'AZQUACK_PG_PASSWORD'
-              secretRef: 'ducklake-catalog-password'
+              name: 'AZQUACK_CATALOG_QUACK_TOKEN'
+              secretRef: 'catalog-quack-token'
             }
             {
               name: 'AZQUACK_QUACK_TOKEN'
@@ -167,7 +292,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               }
               periodSeconds: 5
               initialDelaySeconds: 10
-              failureThreshold: 6
+              failureThreshold: 18
             }
           ]
         }
@@ -180,5 +305,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-output containerAppName string = containerApp.name
-output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
+output queryContainerAppName string = queryContainerApp.name
+output catalogContainerAppName string = catalogContainerApp.name
+output queryContainerAppFqdn string = queryContainerApp.properties.configuration.ingress.fqdn
+output catalogContainerAppFqdn string = catalogContainerApp.properties.configuration.ingress.fqdn

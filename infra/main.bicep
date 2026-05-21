@@ -4,7 +4,7 @@ param environmentName string
 @description('Azure region for all resources.')
 param location string = resourceGroup().location
 
-@description('Storage account SKU.')
+@description('Storage account SKU for DuckLake data files.')
 @allowed([
   'Standard_LRS'
   'Standard_ZRS'
@@ -13,41 +13,14 @@ param location string = resourceGroup().location
 ])
 param storageSkuName string = 'Standard_LRS'
 
-@description('PostgreSQL administrator login. This account is used only by the Quack container to manage DuckLake metadata.')
-param postgresAdminLogin string = 'azquackadmin'
-
-@secure()
-@minLength(12)
-@description('PostgreSQL administrator password.')
-param postgresAdminPassword string
-
-@description('PostgreSQL compute SKU name. Standard_B1ms is the cheapest practical Flexible Server baseline for this prototype.')
-param postgresSkuName string = 'Standard_B1ms'
-
-@description('PostgreSQL compute tier.')
+@description('Storage account SKU for the Azure Files share that stores the DuckDB catalog file.')
 @allowed([
-  'Burstable'
-  'GeneralPurpose'
-  'MemoryOptimized'
+  'Standard_LRS'
+  'Standard_ZRS'
 ])
-param postgresSkuTier string = 'Burstable'
+param catalogStorageSkuName string = 'Standard_LRS'
 
-@description('PostgreSQL engine version.')
-@allowed([
-  '14'
-  '15'
-  '16'
-  '17'
-])
-param postgresVersion string = '16'
-
-@description('PostgreSQL data storage size in GB.')
-param postgresStorageSizeGb int = 32
-
-@description('DuckLake metadata database name.')
-param postgresDatabaseName string = 'ducklake_metadata'
-
-@description('Object ID of the human or service principal allowed to read the Quack token for local smoke tests. Empty skips the assignment.')
+@description('Object ID of the human or service principal allowed to read the public Quack token for local smoke tests. Empty skips the assignment.')
 param operatorPrincipalId string = ''
 
 @allowed([
@@ -58,42 +31,53 @@ param operatorPrincipalId string = ''
 @description('Principal type for operatorPrincipalId.')
 param operatorPrincipalType string = 'User'
 
-@description('Least-privilege PostgreSQL role used by the Quack runtime for DuckLake metadata.')
-param ducklakeCatalogUser string = 'ducklake_app'
-
-@secure()
-@minLength(12)
-@description('Password for the dedicated DuckLake catalog role.')
-param ducklakeCatalogPassword string
-
-@description('Container image for the Azure Container App.')
+@description('Container image for both Azure Container Apps. AZD replaces this after building the local Dockerfile.')
 param containerAppImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
-@description('CPU cores for the container app.')
-param containerCpu string = '0.5'
+@description('CPU cores for the public query Container App.')
+param queryContainerCpu string = '0.5'
 
-@description('Container memory setting.')
-param containerMemory string = '1Gi'
+@description('Memory for the public query Container App.')
+param queryContainerMemory string = '1Gi'
+
+@description('CPU cores for the internal catalog Container App.')
+param catalogContainerCpu string = '0.5'
+
+@description('Memory for the internal catalog Container App.')
+param catalogContainerMemory string = '1Gi'
 
 @description('DuckLake data path in Azure Blob Storage.')
 param ducklakeDataPath string = 'az://lakehouse/data/'
 
 @secure()
 @minLength(32)
-@description('Shared token required by local DuckDB clients connecting through Quack.')
+@description('Shared token required by local DuckDB clients connecting to the public query app through Quack.')
 param quackToken string
+
+@secure()
+@minLength(32)
+@description('Internal token used by the query app to connect to the private catalog app over Quack.')
+param catalogQuackToken string
 
 var uniqueSuffix = toLower(uniqueString(subscription().id, resourceGroup().id, environmentName))
 var storageAccountName = 'st${uniqueSuffix}'
-var postgresServerName = toLower('psql-${environmentName}-${substring(uniqueSuffix, 0, 6)}')
+var catalogStorageAccountName = 'stcat${uniqueSuffix}'
+var catalogFileShareName = 'catalog'
 var containerAppsEnvironmentName = 'cae-${environmentName}'
-var containerAppName = 'ca-${environmentName}'
-var containerAppIdentityName = 'id-ca-${environmentName}'
+var queryContainerAppName = 'ca-${environmentName}-query'
+var catalogContainerAppName = 'ca-${environmentName}-catalog'
+var queryContainerAppIdentityName = 'id-ca-${environmentName}-query'
+var catalogContainerAppIdentityName = 'id-ca-${environmentName}-catalog'
 var acrName = 'acr${uniqueSuffix}'
 var keyVaultName = 'kv-${substring(uniqueSuffix, 0, 10)}'
 
-resource containerAppIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: containerAppIdentityName
+resource queryContainerAppIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: queryContainerAppIdentityName
+  location: location
+}
+
+resource catalogContainerAppIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: catalogContainerAppIdentityName
   location: location
 }
 
@@ -106,18 +90,13 @@ module storage './modules/storage.bicep' = {
   }
 }
 
-module postgres './modules/postgres.bicep' = {
-  name: 'postgres'
+module catalogStorage './modules/catalog-storage.bicep' = {
+  name: 'catalogStorage'
   params: {
     location: location
-    postgresServerName: postgresServerName
-    postgresAdminLogin: postgresAdminLogin
-    postgresAdminPassword: postgresAdminPassword
-    postgresSkuName: postgresSkuName
-    postgresSkuTier: postgresSkuTier
-    postgresVersion: postgresVersion
-    postgresStorageSizeGb: postgresStorageSizeGb
-    postgresDatabaseName: postgresDatabaseName
+    storageAccountName: catalogStorageAccountName
+    storageSkuName: catalogStorageSkuName
+    fileShareName: catalogFileShareName
   }
 }
 
@@ -126,12 +105,12 @@ module keyvault './modules/keyvault.bicep' = {
   params: {
     location: location
     keyVaultName: keyVaultName
-    containerAppPrincipalId: containerAppIdentity.properties.principalId
+    queryContainerAppPrincipalId: queryContainerAppIdentity.properties.principalId
+    catalogContainerAppPrincipalId: catalogContainerAppIdentity.properties.principalId
     operatorPrincipalId: operatorPrincipalId
     operatorPrincipalType: operatorPrincipalType
-    postgresAdminPassword: postgresAdminPassword
-    ducklakeCatalogPassword: ducklakeCatalogPassword
     quackToken: quackToken
+    catalogQuackToken: catalogQuackToken
   }
 }
 
@@ -140,35 +119,40 @@ module acr './modules/acr.bicep' = {
   params: {
     location: location
     acrName: acrName
-    pullPrincipalId: containerAppIdentity.properties.principalId
+    pullPrincipalIds: [
+      queryContainerAppIdentity.properties.principalId
+      catalogContainerAppIdentity.properties.principalId
+    ]
   }
 }
 
-module containerApp './modules/container-app.bicep' = {
-  name: 'containerApp'
+module containerApps './modules/container-app.bicep' = {
+  name: 'containerApps'
   dependsOn: [
-    storageBlobDataContributorAssignment
+    queryStorageBlobDataContributorAssignment
     operatorStorageBlobDataReaderAssignment
   ]
   params: {
     location: location
     containerAppsEnvironmentName: containerAppsEnvironmentName
-    containerAppName: containerAppName
-    containerAppIdentityId: containerAppIdentity.id
-    containerAppIdentityClientId: containerAppIdentity.properties.clientId
+    queryContainerAppName: queryContainerAppName
+    catalogContainerAppName: catalogContainerAppName
+    queryContainerAppIdentityId: queryContainerAppIdentity.id
+    queryContainerAppIdentityClientId: queryContainerAppIdentity.properties.clientId
+    catalogContainerAppIdentityId: catalogContainerAppIdentity.id
+    catalogContainerAppIdentityClientId: catalogContainerAppIdentity.properties.clientId
     containerAppImage: containerAppImage
-    containerCpu: containerCpu
-    containerMemory: containerMemory
+    queryContainerCpu: queryContainerCpu
+    queryContainerMemory: queryContainerMemory
+    catalogContainerCpu: catalogContainerCpu
+    catalogContainerMemory: catalogContainerMemory
     storageAccountName: storage.outputs.storageAccountName
-    postgresFqdn: postgres.outputs.postgresFqdn
-    postgresAdminLogin: postgresAdminLogin
-    ducklakeCatalogUser: ducklakeCatalogUser
-    postgresDatabaseName: postgres.outputs.postgresDatabaseName
+    catalogStorageAccountName: catalogStorage.outputs.storageAccountName
+    catalogFileShareName: catalogStorage.outputs.fileShareName
     ducklakeDataPath: ducklakeDataPath
     acrLoginServer: acr.outputs.acrLoginServer
-    ducklakeCatalogPasswordSecretUri: keyvault.outputs.ducklakeCatalogPasswordSecretUri
-    postgresAdminPasswordSecretUri: keyvault.outputs.postgresPasswordSecretUri
     quackTokenSecretUri: keyvault.outputs.quackTokenSecretUri
+    catalogQuackTokenSecretUri: keyvault.outputs.catalogQuackTokenSecretUri
   }
 }
 
@@ -176,8 +160,8 @@ resource storageAccountExisting 'Microsoft.Storage/storageAccounts@2023-05-01' e
   name: storageAccountName
 }
 
-resource storageBlobDataContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccountName, containerAppIdentityName, 'StorageBlobDataContributor')
+resource queryStorageBlobDataContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccountName, queryContainerAppIdentityName, 'StorageBlobDataContributor')
   scope: storageAccountExisting
   dependsOn: [
     storage
@@ -187,7 +171,7 @@ resource storageBlobDataContributorAssignment 'Microsoft.Authorization/roleAssig
       'Microsoft.Authorization/roleDefinitions',
       'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
     )
-    principalId: containerAppIdentity.properties.principalId
+    principalId: queryContainerAppIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -209,13 +193,15 @@ resource operatorStorageBlobDataReaderAssignment 'Microsoft.Authorization/roleAs
 }
 
 output STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
-output POSTGRES_SERVER_NAME string = postgres.outputs.postgresServerName
-output POSTGRES_FQDN string = postgres.outputs.postgresFqdn
-output POSTGRES_DATABASE_NAME string = postgres.outputs.postgresDatabaseName
-output CONTAINER_APP_NAME string = containerApp.outputs.containerAppName
-output CONTAINER_APP_FQDN string = containerApp.outputs.containerAppFqdn
-output QUACK_URI string = 'quack:${containerApp.outputs.containerAppFqdn}:443'
-output QUACK_HTTP_URL string = 'https://${containerApp.outputs.containerAppFqdn}'
+output CATALOG_STORAGE_ACCOUNT_NAME string = catalogStorage.outputs.storageAccountName
+output CATALOG_FILE_SHARE_NAME string = catalogStorage.outputs.fileShareName
+output QUERY_CONTAINER_APP_NAME string = containerApps.outputs.queryContainerAppName
+output CATALOG_CONTAINER_APP_NAME string = containerApps.outputs.catalogContainerAppName
+output CONTAINER_APP_NAME string = containerApps.outputs.queryContainerAppName
+output QUERY_CONTAINER_APP_FQDN string = containerApps.outputs.queryContainerAppFqdn
+output CATALOG_CONTAINER_APP_FQDN string = containerApps.outputs.catalogContainerAppFqdn
+output QUACK_URI string = 'quack:${containerApps.outputs.queryContainerAppFqdn}:443'
+output QUACK_HTTP_URL string = 'https://${containerApps.outputs.queryContainerAppFqdn}'
 output KEY_VAULT_NAME string = keyvault.outputs.keyVaultName
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = acr.outputs.acrLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = acr.outputs.acrName

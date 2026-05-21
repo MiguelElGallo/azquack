@@ -9,13 +9,18 @@ umask 077
 QUACK_URI="$(azd env get-value QUACK_URI)"
 KEY_VAULT_NAME="$(azd env get-value KEY_VAULT_NAME)"
 QUACK_TOKEN="$(az keyvault secret show --vault-name "$KEY_VAULT_NAME" --name quack-token --query value -o tsv)"
+local_version="$(duckdb -csv -c 'SELECT version();' | tail -n 1)"
+if [ "$local_version" != "v1.5.3" ]; then
+  printf 'Local duckdb CLI must be v1.5.3 for Quack catalog validation. Found %s.\n' "$local_version" >&2
+  exit 1
+fi
 
 tmp_sql="$(mktemp "${TMPDIR:-/tmp}/azquack-client.XXXXXX.sql")"
 trap 'rm -f "$tmp_sql"' EXIT
 
 cat > "$tmp_sql" <<SQL
 .bail on
-FORCE INSTALL quack FROM core_nightly;
+INSTALL quack;
 LOAD quack;
 
 CREATE OR REPLACE SECRET azquack_remote (

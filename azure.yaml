@@ -5,7 +5,14 @@ infra:
   provider: bicep
   path: infra
 services:
-  quack:
+  catalog:
+    host: containerapp
+    project: .
+    language: docker
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true
+  query:
     host: containerapp
     project: .
     language: docker

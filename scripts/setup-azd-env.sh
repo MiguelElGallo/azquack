@@ -25,9 +25,8 @@ set_if_empty() {
   fi
 }
 
-set_if_empty POSTGRES_ADMIN_PASSWORD "Azq1$(random_alnum 28)"
-set_if_empty DUCKLAKE_CATALOG_PASSWORD "Azq1$(random_alnum 28)"
 set_if_empty QUACK_TOKEN "$(random_alnum 48)"
+set_if_empty CATALOG_QUACK_TOKEN "$(random_alnum 48)"
 set_if_empty DUCKLAKE_DATA_PATH "az://lakehouse/data/"
 set_if_empty OPERATOR_PRINCIPAL_TYPE "User"
 

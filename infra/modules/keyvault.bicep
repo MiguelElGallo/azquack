@@ -1,17 +1,20 @@
 param location string
 param keyVaultName string
-param containerAppPrincipalId string
+param queryContainerAppPrincipalId string
+param catalogContainerAppPrincipalId string
 param operatorPrincipalId string = ''
 param operatorPrincipalType string = 'User'
 
 @secure()
-param postgresAdminPassword string
-
-@secure()
-param ducklakeCatalogPassword string
-
-@secure()
 param quackToken string
+
+@secure()
+param catalogQuackToken string
+
+var keyVaultSecretsUserRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '4633458b-17de-408a-b874-0445c86b69e6'
+)
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
@@ -33,82 +36,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-resource catalogPasswordSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(ducklakeCatalogPasswordSecret.id, containerAppPrincipalId, 'KeyVaultSecretsUser')
-  scope: ducklakeCatalogPasswordSecret
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '4633458b-17de-408a-b874-0445c86b69e6'
-    )
-    principalId: containerAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource postgresAdminPasswordSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(postgresPasswordSecret.id, containerAppPrincipalId, 'KeyVaultSecretsUser')
-  scope: postgresPasswordSecret
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '4633458b-17de-408a-b874-0445c86b69e6'
-    )
-    principalId: containerAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource quackTokenSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(quackTokenSecret.id, containerAppPrincipalId, 'KeyVaultSecretsUser')
-  scope: quackTokenSecret
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '4633458b-17de-408a-b874-0445c86b69e6'
-    )
-    principalId: containerAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource operatorSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(operatorPrincipalId)) {
-  name: guid(keyVault.id, operatorPrincipalId, 'KeyVaultSecretsUser')
-  scope: quackTokenSecret
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '4633458b-17de-408a-b874-0445c86b69e6'
-    )
-    principalId: operatorPrincipalId
-    principalType: operatorPrincipalType
-  }
-}
-
-resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'postgres-admin-password'
-  properties: {
-    value: postgresAdminPassword
-    contentType: 'text/plain'
-    attributes: {
-      enabled: true
-    }
-  }
-}
-
-resource ducklakeCatalogPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'ducklake-catalog-password'
-  properties: {
-    value: ducklakeCatalogPassword
-    contentType: 'text/plain'
-    attributes: {
-      enabled: true
-    }
-  }
-}
-
 resource quackTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'quack-token'
@@ -121,13 +48,62 @@ resource quackTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
+resource catalogQuackTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'catalog-quack-token'
+  properties: {
+    value: catalogQuackToken
+    contentType: 'text/plain'
+    attributes: {
+      enabled: true
+    }
+  }
+}
+
+resource queryPublicTokenSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(quackTokenSecret.id, queryContainerAppPrincipalId, 'KeyVaultSecretsUser')
+  scope: quackTokenSecret
+  properties: {
+    roleDefinitionId: keyVaultSecretsUserRoleId
+    principalId: queryContainerAppPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource queryCatalogTokenSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(catalogQuackTokenSecret.id, queryContainerAppPrincipalId, 'KeyVaultSecretsUser')
+  scope: catalogQuackTokenSecret
+  properties: {
+    roleDefinitionId: keyVaultSecretsUserRoleId
+    principalId: queryContainerAppPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource catalogTokenSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(catalogQuackTokenSecret.id, catalogContainerAppPrincipalId, 'KeyVaultSecretsUser')
+  scope: catalogQuackTokenSecret
+  properties: {
+    roleDefinitionId: keyVaultSecretsUserRoleId
+    principalId: catalogContainerAppPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource operatorQuackTokenSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(operatorPrincipalId)) {
+  name: guid(quackTokenSecret.id, operatorPrincipalId, 'KeyVaultSecretsUser')
+  scope: quackTokenSecret
+  properties: {
+    roleDefinitionId: keyVaultSecretsUserRoleId
+    principalId: operatorPrincipalId
+    principalType: operatorPrincipalType
+  }
+}
+
 output keyVaultName string = keyVault.name
 
 #disable-next-line outputs-should-not-contain-secrets
-output postgresPasswordSecretUri string = postgresPasswordSecret.properties.secretUri
-
-#disable-next-line outputs-should-not-contain-secrets
-output ducklakeCatalogPasswordSecretUri string = ducklakeCatalogPasswordSecret.properties.secretUri
-
-#disable-next-line outputs-should-not-contain-secrets
 output quackTokenSecretUri string = quackTokenSecret.properties.secretUri
+
+#disable-next-line outputs-should-not-contain-secrets
+output catalogQuackTokenSecretUri string = catalogQuackTokenSecret.properties.secretUri
