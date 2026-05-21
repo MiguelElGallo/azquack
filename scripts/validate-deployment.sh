@@ -28,15 +28,74 @@ wait_for_ready() {
 restart_active_revision() {
   app_name="$1"
   resource_group="$2"
-  revision="$(az containerapp revision list \
+  revision="$(az containerapp show \
     --name "$app_name" \
     --resource-group "$resource_group" \
-    --query "[?properties.active].name | [0]" \
+    --query "properties.latestReadyRevisionName" \
     -o tsv)"
   az containerapp revision restart \
     --name "$app_name" \
     --resource-group "$resource_group" \
     --revision "$revision" >/dev/null
+}
+
+assert_single_healthy_revision() {
+  app_name="$1"
+  resource_group="$2"
+  active_count="$(az containerapp revision list \
+    --name "$app_name" \
+    --resource-group "$resource_group" \
+    --query "[?properties.active] | length(@)" \
+    -o tsv)"
+  if [ "$active_count" != "1" ]; then
+    printf 'Expected exactly one active revision for %s, found %s.\n' "$app_name" "$active_count" >&2
+    az containerapp revision list \
+      --name "$app_name" \
+      --resource-group "$resource_group" \
+      --query "[].{name:name,active:properties.active,traffic:properties.trafficWeight,replicas:properties.replicas,runningState:properties.runningState,health:properties.healthState}" \
+      -o table >&2
+    exit 1
+  fi
+
+  latest_revision="$(az containerapp show \
+    --name "$app_name" \
+    --resource-group "$resource_group" \
+    --query "properties.latestRevisionName" \
+    -o tsv)"
+  latest_ready_revision="$(az containerapp show \
+    --name "$app_name" \
+    --resource-group "$resource_group" \
+    --query "properties.latestReadyRevisionName" \
+    -o tsv)"
+  if [ "$latest_revision" != "$latest_ready_revision" ]; then
+    printf 'Latest revision for %s is not ready. latest=%s ready=%s\n' "$app_name" "$latest_revision" "$latest_ready_revision" >&2
+    exit 1
+  fi
+
+  state="$(az containerapp revision show \
+    --name "$app_name" \
+    --resource-group "$resource_group" \
+    --revision "$latest_revision" \
+    --query "[properties.runningState, properties.healthState, properties.trafficWeight, properties.replicas]" \
+    -o tsv)"
+  set -- $state
+  running_state="$1"
+  health_state="$2"
+  traffic_weight="$3"
+  replica_count="$4"
+  case "$running_state" in
+    Running|RunningAtMaxScale|RunningAtMinScale) ;;
+    *)
+      printf 'Unexpected running state for %s: running=%s health=%s traffic=%s replicas=%s\n' \
+        "$app_name" "$running_state" "$health_state" "$traffic_weight" "$replica_count" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$health_state" != "Healthy" ] || [ "$traffic_weight" != "100" ] || [ "$replica_count" != "1" ]; then
+    printf 'Unexpected revision state for %s: running=%s health=%s traffic=%s replicas=%s\n' \
+      "$app_name" "$running_state" "$health_state" "$traffic_weight" "$replica_count" >&2
+    exit 1
+  fi
 }
 
 collect_logs() {
@@ -135,6 +194,25 @@ if curl --fail --silent --show-error --max-time 10 "https://${CATALOG_CONTAINER_
   exit 1
 fi
 
+printf 'Checking Container App revisions are healthy and single-active...\n'
+assert_single_healthy_revision "$QUERY_CONTAINER_APP_NAME" "$RESOURCE_GROUP"
+assert_single_healthy_revision "$CATALOG_CONTAINER_APP_NAME" "$RESOURCE_GROUP"
+
+query_scale="$(az containerapp show \
+  --name "$QUERY_CONTAINER_APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "[properties.template.scale.minReplicas, properties.template.scale.maxReplicas, properties.configuration.ingress.stickySessions.affinity]" \
+  -o tsv)"
+set -- $query_scale
+query_min_replicas="$1"
+query_max_replicas="$2"
+query_sticky_sessions="${3:-none}"
+if [ "$query_min_replicas" != "1" ] || [ "$query_max_replicas" != "1" ] || [ "$query_sticky_sessions" != "none" ]; then
+  printf 'Default validator requires query scale 1/1 with sticky sessions disabled. Found min=%s max=%s sticky=%s.\n' \
+    "$query_min_replicas" "$query_max_replicas" "$query_sticky_sessions" >&2
+  exit 1
+fi
+
 printf 'Checking both Container Apps run images from the deployed ACR...\n'
 query_image="$(az containerapp show \
   --name "$QUERY_CONTAINER_APP_NAME" \
@@ -165,6 +243,11 @@ done
 printf 'Checking public query health endpoint...\n'
 curl --fail --silent --show-error "$QUACK_HTTP_URL/healthz" >/dev/null
 wait_for_ready "$QUACK_HTTP_URL" 300
+ready_body="$(curl --fail --silent --show-error "$QUACK_HTTP_URL/readyz")"
+if printf '%s' "$ready_body" | grep -E 'container_app|replica|revision|hostname' >/dev/null; then
+  printf 'Public /readyz exposes platform metadata in the default deployment: %s\n' "$ready_body" >&2
+  exit 1
+fi
 
 printf 'Counting existing DuckLake data blobs...\n'
 before_blob_count="$(az storage blob list \
@@ -419,19 +502,8 @@ if [ "$post_marker_count" != "1" ] || [ "$post_validation_rows" != "1000" ] || [
   exit 1
 fi
 
-printf 'Restarting catalog app, then query app, and verifying metadata persists...\n'
-restart_active_revision "$CATALOG_CONTAINER_APP_NAME" "$RESOURCE_GROUP"
-sleep 30
-restart_active_revision "$QUERY_CONTAINER_APP_NAME" "$RESOURCE_GROUP"
-wait_for_ready "$QUACK_HTTP_URL" 300
-post_catalog_restart_counts="$(duckdb -csv < "$post_restart_sql" | tail -n 1)"
-IFS=, read -r post_catalog_marker_count post_catalog_validation_rows post_catalog_validation_files <<EOF
-$post_catalog_restart_counts
-EOF
-if [ "$post_catalog_marker_count" != "1" ] || [ "$post_catalog_validation_rows" != "1000" ] || [ "${post_catalog_validation_files:-0}" = "0" ]; then
-  printf 'Catalog restart persistence check failed: %s\n' "$post_catalog_restart_counts" >&2
-  exit 1
-fi
+printf 'Rechecking catalog app health without restarting the catalog file owner...\n'
+assert_single_healthy_revision "$CATALOG_CONTAINER_APP_NAME" "$RESOURCE_GROUP"
 
 printf 'Scanning recent Container App logs for literal public token value...\n'
 collect_logs "$QUERY_CONTAINER_APP_NAME" "$RESOURCE_GROUP" "$query_logs_file"
