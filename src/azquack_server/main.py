@@ -21,6 +21,27 @@ STOP = threading.Event()
 STARTUP_ERROR: str | None = None
 
 
+def platform_metadata() -> dict[str, str | None]:
+    return {
+        "container_app_name": os.getenv("CONTAINER_APP_NAME"),
+        "container_app_revision": os.getenv("CONTAINER_APP_REVISION"),
+        "container_app_replica_name": os.getenv("CONTAINER_APP_REPLICA_NAME"),
+        "container_app_hostname": os.getenv("CONTAINER_APP_HOSTNAME"),
+    }
+
+
+def quack_node_name() -> str:
+    base = os.getenv("AZQUACK_NODE_NAME", "azquack")
+    replica = os.getenv("CONTAINER_APP_REPLICA_NAME")
+    if replica:
+        return f"{base}-{replica}"
+    return base
+
+
+def expose_platform_metadata() -> bool:
+    return os.getenv("AZQUACK_EXPOSE_PLATFORM_METADATA", "false").lower() == "true"
+
+
 def require_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -40,11 +61,10 @@ class HealthHandler(BaseHTTPRequestHandler):
             return
 
         status = 503 if self.path == "/readyz" and not READY.is_set() else 200
-        body = json.dumps(
-            {
-                "ready": READY.is_set(),
-            }
-        ).encode("utf-8")
+        payload = {"ready": READY.is_set()}
+        if expose_platform_metadata():
+            payload.update(platform_metadata())
+        body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -189,11 +209,12 @@ def identify_node(con: duckdb.DuckDBPyConnection) -> None:
         "role": os.getenv("AZQUACK_ROLE", "query"),
         "storage_account": os.getenv("AZQUACK_STORAGE_ACCOUNT"),
         "ducklake_data_path": os.getenv("AZQUACK_DUCKLAKE_DATA_PATH"),
+        **platform_metadata(),
     }
     con.execute(
         f"""
         CALL quack_identify(
-            name => {sql_string(os.getenv("AZQUACK_NODE_NAME", "azquack"))},
+            name => {sql_string(quack_node_name())},
             provider => 'azure-container-apps',
             region => {sql_string(os.getenv("AZURE_LOCATION", "unknown"))},
             meta => {sql_string(json.dumps(meta, sort_keys=True))}

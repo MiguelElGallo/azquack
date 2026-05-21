@@ -40,6 +40,26 @@ param queryContainerCpu string = '0.5'
 @description('Memory for the public query Container App.')
 param queryContainerMemory string = '1Gi'
 
+@description('Minimum replicas for the public query Container App. Keep 1 unless testing multi-replica Quack routing.')
+param queryMinReplicas string = '1'
+
+@description('Maximum replicas for the public query Container App. Keep 1 unless testing multi-replica Quack routing.')
+param queryMaxReplicas string = '1'
+
+@allowed([
+  'none'
+  'sticky'
+])
+@description('Session affinity for the public query Container App ingress. Use sticky only for the Quack multi-replica experiment.')
+param queryStickySessions string = 'none'
+
+@allowed([
+  'false'
+  'true'
+])
+@description('Expose Container Apps replica metadata from /readyz for the sticky-session experiment.')
+param queryExposePlatformMetadata string = 'false'
+
 @description('CPU cores for the internal catalog Container App.')
 param catalogContainerCpu string = '0.5'
 
@@ -144,6 +164,10 @@ module containerApps './modules/container-app.bicep' = {
     containerAppImage: containerAppImage
     queryContainerCpu: queryContainerCpu
     queryContainerMemory: queryContainerMemory
+    queryMinReplicas: queryMinReplicas
+    queryMaxReplicas: queryMaxReplicas
+    queryStickySessions: queryStickySessions
+    queryExposePlatformMetadata: queryExposePlatformMetadata
     catalogContainerCpu: catalogContainerCpu
     catalogContainerMemory: catalogContainerMemory
     storageAccountName: storage.outputs.storageAccountName

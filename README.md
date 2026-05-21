@@ -182,15 +182,36 @@ Expected ending:
 Deployment validation passed.
 ```
 
-The validator checks five things:
+The validator runs the main live checks:
 
 - Azure shape: no PostgreSQL, two ACR-backed Container Apps, internal catalog ingress
+- rollback shape: one active healthy revision per app, query scale `1/1`, sticky sessions disabled, public `/readyz` metadata hidden
 - Quack auth: valid token works, wrong token fails
 - DuckLake writes: metadata and Blob data files are created
-- persistence: query and catalog restarts preserve rows
+- persistence: a query restart preserves DuckLake rows and the catalog remains healthy
 - hygiene: recent logs do not contain token values available to the validator
 
 The script reads values from the active AZD environment.
+
+## Test Query Replicas
+
+The default deployment keeps the public query app at one replica.
+To test whether Azure Container Apps sticky sessions work with DuckDB Quack, deploy the query app with two replicas and keep the catalog app at one replica:
+
+```sh
+azd env set QUERY_MIN_REPLICAS 2
+azd env set QUERY_MAX_REPLICAS 2
+azd env set QUERY_STICKY_SESSIONS sticky
+azd env set QUERY_EXPOSE_PLATFORM_METADATA true
+azd up
+./scripts/validate-sticky-sessions.py
+```
+
+The sticky-session validator checks the live Azure settings, confirms two query replicas are running, confirms the catalog is still single-replica, then runs repeated Quack calls from multiple local DuckDB clients to see whether each attached session stays on one query replica.
+
+The current result is negative: ACA affinity works for normal cookie-aware HTTP calls, but the DuckDB Quack client does not appear to replay ACA's affinity cookie.
+Repeated Quack calls after `ATTACH` can fail with `Invalid connection id` when the query app has more than one replica.
+Keep the default `1/1` query replica shape unless Quack adds a cookie-aware or otherwise replica-safe client path.
 
 ## Query It From DuckDB
 

@@ -28,6 +28,10 @@ set_if_empty() {
 set_if_empty QUACK_TOKEN "$(random_alnum 48)"
 set_if_empty CATALOG_QUACK_TOKEN "$(random_alnum 48)"
 set_if_empty DUCKLAKE_DATA_PATH "az://lakehouse/data/"
+set_if_empty QUERY_MIN_REPLICAS "1"
+set_if_empty QUERY_MAX_REPLICAS "1"
+set_if_empty QUERY_STICKY_SESSIONS "none"
+set_if_empty QUERY_EXPOSE_PLATFORM_METADATA "false"
 set_if_empty OPERATOR_PRINCIPAL_TYPE "User"
 
 if [ -z "$(get_env_value OPERATOR_PRINCIPAL_ID)" ] && command -v az >/dev/null 2>&1; then

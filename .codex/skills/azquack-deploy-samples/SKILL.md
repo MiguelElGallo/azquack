@@ -49,7 +49,7 @@ Run the full live validation first:
 ./scripts/validate-deployment.sh
 ```
 
-It must show `Deployment validation passed.` This checks no PostgreSQL resource exists, both apps run ACR images, catalog ingress is internal-only, authenticated Quack attach, wrong-token rejection, DuckLake writes, rollback/commit behavior, concurrent writers, Blob file proof, Azure Files catalog proof, query restart persistence, catalog restart persistence, and token log hygiene.
+It must show `Deployment validation passed.` This checks no PostgreSQL resource exists, both apps run ACR images, catalog ingress is internal-only, authenticated Quack attach, wrong-token rejection, DuckLake writes, rollback/commit behavior, concurrent writers, Blob file proof, Azure Files catalog proof, query restart persistence, catalog health without restarting the catalog file owner, and token log hygiene.
 
 Then run the small local sample:
 

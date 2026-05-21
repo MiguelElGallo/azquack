@@ -9,6 +9,10 @@ param catalogContainerAppIdentityClientId string
 param containerAppImage string
 param queryContainerCpu string
 param queryContainerMemory string
+param queryMinReplicas string
+param queryMaxReplicas string
+param queryStickySessions string
+param queryExposePlatformMetadata string
 param catalogContainerCpu string
 param catalogContainerMemory string
 param storageAccountName string
@@ -224,6 +228,9 @@ resource queryContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 8081
         transport: 'auto'
         allowInsecure: false
+        stickySessions: {
+          affinity: queryStickySessions
+        }
       }
     }
     template: {
@@ -251,6 +258,10 @@ resource queryContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'AZQUACK_NODE_NAME'
               value: 'azquack-query'
+            }
+            {
+              name: 'AZQUACK_EXPOSE_PLATFORM_METADATA'
+              value: queryExposePlatformMetadata
             }
             {
               name: 'AZQUACK_STORAGE_ACCOUNT'
@@ -298,8 +309,8 @@ resource queryContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
       ]
       scale: {
-        minReplicas: 1
-        maxReplicas: 1
+        minReplicas: int(queryMinReplicas)
+        maxReplicas: int(queryMaxReplicas)
       }
     }
   }

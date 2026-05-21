@@ -11,6 +11,18 @@
     "ducklakeDataPath": {
       "value": "${DUCKLAKE_DATA_PATH}"
     },
+    "queryMinReplicas": {
+      "value": "${QUERY_MIN_REPLICAS}"
+    },
+    "queryMaxReplicas": {
+      "value": "${QUERY_MAX_REPLICAS}"
+    },
+    "queryStickySessions": {
+      "value": "${QUERY_STICKY_SESSIONS}"
+    },
+    "queryExposePlatformMetadata": {
+      "value": "${QUERY_EXPOSE_PLATFORM_METADATA}"
+    },
     "operatorPrincipalId": {
       "value": "${OPERATOR_PRINCIPAL_ID}"
     },
